@@ -1,0 +1,94 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+docket_monitor.log
+
+# State files (may contain sensitive tracking data)
+docket_monitor*.json
+!docket_monitor*.json.example
+
+# Downloaded documents
+court_documents/
+*.pdf
+*.png
+
+# Temporary/new entries files
+new_entries_*.json
+
+# Configuration files with personal data (create .example versions instead)
+ricardo.json
+sina.json
+*.json
+!requirements.txt
+!package.json
+!tsconfig.json
+# Allow example configs
+*.json.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.backup
+*.bak
+*~
+
+# Working/development files
+*-working-*.py
+SAVEPOINT-*.py
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
