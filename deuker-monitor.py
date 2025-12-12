@@ -112,6 +112,11 @@ class MiamiDadeCourtMonitor:
         self.notification_email = notification_email
         self.download_documents = download_documents
         self.documents_dir = Path(documents_dir)
+        self.screenshots_dir = Path("screenshots")
+        self.screenshot_counter = 0
+
+        # Create screenshots directory
+        self.screenshots_dir.mkdir(exist_ok=True)
 
         # Set up logging first (needed by _normalize_case_number)
         logging.basicConfig(
@@ -125,6 +130,12 @@ class MiamiDadeCourtMonitor:
         self.logger = logging.getLogger(__name__)
 
         self.filter_case_number = self._normalize_case_number(filter_case_number) if filter_case_number else ""
+        # #region agent log
+        with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+            import json as json_module
+            f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:127','message':'Filter case number initialized in __init__','data':{'original':filter_case_number,'normalized':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
+        # #endregion
+        print(f"🔍 DEBUG: __init__ - filter_case_number param = '{filter_case_number}', normalized = '{self.filter_case_number}'")
 
         # Create documents directory if download is enabled
         if self.download_documents:
@@ -159,10 +170,20 @@ class MiamiDadeCourtMonitor:
         if len(clean) == 9 and clean[0].isalpha() and clean[1:].isdigit():
             normalized = f"{clean[0]}-{clean[1:3]}-{clean[3:]}"
             self.logger.debug(f"Normalized case number: {case_number} -> {normalized}")
+            # #region agent log
+            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'C','location':'deuker-monitor.py:160','message':'Case number normalized','data':{'input':case_number,'clean':clean,'normalized':normalized,'len_clean':len(clean),'is_alpha':clean[0].isalpha() if clean else False,'is_digit':clean[1:].isdigit() if len(clean)>1 else False},'timestamp':int(time.time()*1000)})+'\n')
+            # #endregion
             return normalized
         else:
             # Already has dashes or unknown format, return as-is
             self.logger.warning(f"Case number format not recognized: {case_number}")
+            # #region agent log
+            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'C','location':'deuker-monitor.py:166','message':'Case number normalization failed','data':{'input':case_number,'clean':clean,'len_clean':len(clean),'returning':case_number.upper()},'timestamp':int(time.time()*1000)})+'\n')
+            # #endregion
             return case_number.upper()
 
     def _load_state(self):
@@ -228,6 +249,28 @@ class MiamiDadeCourtMonitor:
             self.logger.error(f"Error initializing browser: {e}")
             raise
 
+    def _take_screenshot(self, description: str = ""):
+        """
+        Take a screenshot and save it to the screenshots directory
+        
+        Args:
+            description: Description of what action was performed (used in filename)
+        """
+        if not self.page:
+            return
+        
+        try:
+            self.screenshot_counter += 1
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            safe_desc = re.sub(r'[^\w\s-]', '', description)[:50] if description else "screenshot"
+            safe_desc = re.sub(r'[-\s]+', '-', safe_desc)
+            filename = f"{self.screenshot_counter:04d}_{timestamp}_{safe_desc}.png"
+            filepath = self.screenshots_dir / filename
+            self.page.screenshot(path=str(filepath), full_page=True)
+            self.logger.debug(f"📸 Screenshot saved: {filename}")
+        except Exception as e:
+            self.logger.debug(f"Error taking screenshot: {e}")
+
     def _close_browser(self):
         """Close Playwright browser and cleanup"""
         try:
@@ -254,6 +297,7 @@ class MiamiDadeCourtMonitor:
         try:
             self.logger.info("Navigating to search page...")
             self.page.goto(self.SEARCH_URL, wait_until="networkidle", timeout=60000)
+            self._take_screenshot("01-initial-search-page")
 
             # Click on "Defendant" button/link
             self.logger.info("Clicking Defendant search option...")
@@ -271,12 +315,14 @@ class MiamiDadeCourtMonitor:
                     self.page.click(selector, timeout=5000)
                     clicked = True
                     self.logger.info(f"Clicked Defendant using selector: {selector}")
+                    self._take_screenshot("02-after-click-defendant")
                     break
                 except:
                     continue
 
             if not clicked:
                 self.logger.error("Could not find Defendant search button")
+                self._take_screenshot("02-error-defendant-button-not-found")
                 return False
 
             # Wait for the form popup to appear
@@ -295,6 +341,7 @@ class MiamiDadeCourtMonitor:
                 try:
                     self.page.fill(selector, self.defendant_first_name, timeout=5000)
                     self.logger.debug(f"Filled first name using: {selector}")
+                    self._take_screenshot("03-after-fill-first-name")
                     break
                 except:
                     continue
@@ -309,6 +356,7 @@ class MiamiDadeCourtMonitor:
                 try:
                     self.page.fill(selector, self.defendant_last_name, timeout=5000)
                     self.logger.debug(f"Filled last name using: {selector}")
+                    self._take_screenshot("04-after-fill-last-name")
                     break
                 except:
                     continue
@@ -323,6 +371,7 @@ class MiamiDadeCourtMonitor:
                 try:
                     self.page.select_option(selector, self.defendant_sex, timeout=5000)
                     self.logger.debug(f"Selected sex using: {selector}")
+                    self._take_screenshot("05-after-select-sex")
                     break
                 except:
                     continue
@@ -340,6 +389,7 @@ class MiamiDadeCourtMonitor:
                 try:
                     self.page.click(selector, timeout=5000)
                     self.logger.info(f"Clicked search using: {selector}")
+                    self._take_screenshot("06-after-click-search")
                     break
                 except:
                     continue
@@ -347,6 +397,7 @@ class MiamiDadeCourtMonitor:
             # Wait for results to load
             time.sleep(3)
             self.logger.info("Search submitted, waiting for results...")
+            self._take_screenshot("07-search-results")
 
             return True
 
@@ -403,6 +454,7 @@ class MiamiDadeCourtMonitor:
                 try:
                     self.page.click(selector, timeout=5000)
                     self.logger.info(f"Clicked defendant result using: {selector}")
+                    self._take_screenshot("08-after-click-defendant-result")
                     clicked_defendant = True
                     break
                 except:
@@ -410,11 +462,13 @@ class MiamiDadeCourtMonitor:
 
             if not clicked_defendant:
                 self.logger.error("Could not find defendant result to click")
+                self._take_screenshot("08-error-defendant-result-not-found")
                 return cases
 
             # Wait for the popup with case information to appear
             time.sleep(2)
             self.logger.info("Extracting cases from popup...")
+            self._take_screenshot("09-case-popup-opened")
 
             # Get the rendered HTML
             html = self.page.content()
@@ -489,6 +543,11 @@ class MiamiDadeCourtMonitor:
                         })
 
                         self.logger.debug(f"Found case: {case_number}")
+                        # #region agent log
+                        with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                            import json as json_module
+                            f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'B','location':'deuker-monitor.py:491','message':'Case extracted from page','data':{'case_number':case_number,'case_text_preview':case_text[:50],'has_link':case_link is not None,'filter_case_number':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
+                        # #endregion
 
                     except Exception as e:
                         self.logger.debug(f"Error parsing case row: {e}")
@@ -539,6 +598,7 @@ class MiamiDadeCourtMonitor:
                     self.logger.debug(f"Trying selector: {selector}")
                     self.page.click(selector, timeout=5000)
                     self.logger.info(f"✓ Clicked case {case_number} using: {selector}")
+                    self._take_screenshot(f"10-after-click-case-{case_number}")
                     clicked_case = True
                     break
                 except Exception as e:
@@ -547,9 +607,11 @@ class MiamiDadeCourtMonitor:
 
             if not clicked_case:
                 self.logger.warning(f"Could not click case {case_number}, trying URL navigation...")
+                self._take_screenshot(f"10-error-case-click-failed-{case_number}")
                 # Fallback: try to navigate directly if clicking didn't work
                 if case_url:
                     self.page.goto(case_url, wait_until="networkidle", timeout=60000)
+                    self._take_screenshot(f"10-after-navigate-case-{case_number}")
                 else:
                     self.logger.error(f"No URL available for case {case_number}, cannot navigate!")
                     return charges, dockets
@@ -557,6 +619,7 @@ class MiamiDadeCourtMonitor:
             # Wait for case page to load
             time.sleep(2)
             self.logger.debug(f"Case page loaded, URL: {self.page.url}")
+            self._take_screenshot(f"11-case-page-loaded-{case_number}")
 
             # STEP 1: Expand and parse CHARGES section
             self.logger.info(f"Expanding CHARGES section for {case_number}...")
@@ -581,6 +644,7 @@ class MiamiDadeCourtMonitor:
                         self.logger.debug(f"Trying CHARGES selector: {selector}")
                         self.page.click(selector, timeout=3000)
                         self.logger.info(f"✓ Clicked CHARGES using: {selector}")
+                        self._take_screenshot(f"12-after-click-charges-{case_number}")
                         clicked_charges = True
                         time.sleep(1)
                         break
@@ -590,6 +654,7 @@ class MiamiDadeCourtMonitor:
 
                 if not clicked_charges:
                     self.logger.warning("Could not click CHARGES section - may already be expanded or not found")
+                    self._take_screenshot(f"12-charges-not-clickable-{case_number}")
             except Exception as e:
                 self.logger.warning(f"Error expanding CHARGES section: {e}")
 
@@ -652,6 +717,7 @@ class MiamiDadeCourtMonitor:
                         self.logger.debug(f"Trying DOCKETS selector: {selector}")
                         self.page.click(selector, timeout=3000)
                         self.logger.info(f"✓ Clicked DOCKETS using: {selector}")
+                        self._take_screenshot(f"13-after-click-dockets-{case_number}")
                         clicked_dockets = True
                         time.sleep(1)
                         break
@@ -661,6 +727,7 @@ class MiamiDadeCourtMonitor:
 
                 if not clicked_dockets:
                     self.logger.warning("Could not click DOCKETS section - may already be expanded or not found")
+                    self._take_screenshot(f"13-dockets-not-clickable-{case_number}")
             except Exception as e:
                 self.logger.warning(f"Error expanding DOCKETS section: {e}")
 
@@ -1101,6 +1168,7 @@ class MiamiDadeCourtMonitor:
                     self.logger.debug(f"Trying Extra Documents selector: {selector}")
                     self.page.click(selector, timeout=3000)
                     self.logger.info(f"✓ Clicked Extra Documents tab using: {selector}")
+                    self._take_screenshot(f"14-after-click-extra-documents-{case_number}")
                     clicked = True
                     time.sleep(1)
                     break
@@ -1110,6 +1178,7 @@ class MiamiDadeCourtMonitor:
 
             if not clicked:
                 self.logger.debug("Could not click Extra Documents tab")
+                self._take_screenshot(f"14-extra-documents-not-clickable-{case_number}")
                 return
 
             # Parse the Extra Documents table
@@ -1194,83 +1263,191 @@ class MiamiDadeCourtMonitor:
                         clicked_view = False
                         viewer_page = None
                         initial_pages = len(self.page.context.pages)
+                        current_url = self.page.url
 
-                        self.logger.info(f"DEBUG: Looking for Extra Doc view button...")
+                        self.logger.debug(f"Looking for Extra Doc view button for: {doc_desc}")
 
-                        # Debug: Check what's in the first cell
-                        first_cell = self.page.locator('table tr:has-text("Arrest Form Summary") td:first-child')
-                        if first_cell.count() > 0:
-                            cell_html = first_cell.first.inner_html()
-                            self.logger.info(f"DEBUG: First cell HTML: {cell_html[:200]}")
+                        # Find the row containing this document description
+                        # Use a more flexible selector that works with any document name
+                        doc_desc_short = doc_desc[:50].strip()  # Use first 50 chars for matching
+                        row_locator = self.page.locator(f'table tr:has-text("{doc_desc_short}")')
+                        
+                        if row_locator.count() == 0:
+                            # Try with just first few words
+                            first_words = ' '.join(doc_desc.split()[:3])
+                            row_locator = self.page.locator(f'table tr:has-text("{first_words}")')
+                        
+                        if row_locator.count() == 0:
+                            self.logger.warning(f"Could not find row for document: {doc_desc}")
+                            continue
 
-                        # The desktop version button is NOT in d-md-none
-                        # Look for span with role="button" that's not in a d-md-none div
-                        view_links = self.page.locator('table tr:has-text("Arrest Form Summary") td:first-child span[role="button"]:not(.d-md-none span[role="button"])')
-                        self.logger.info(f"DEBUG: Found {view_links.count()} desktop view buttons")
-
-                        if view_links.count() == 0:
-                            # Fallback: try any span with aria-label containing "View"
-                            view_links = self.page.locator('table tr:has-text("Arrest Form Summary") span[aria-label*="View"]')
-                            self.logger.info(f"DEBUG: Found {view_links.count()} spans with View aria-label")
-
-                        if view_links.count() > 0:
-                            # Use the first one
-                            self.logger.info(f"DEBUG: Getting first view link...")
-                            view_btn = view_links.first
-                            # Skip scroll_into_view - it hangs on Extra Documents
-
-                            self.logger.info(f"DEBUG: About to click Extra Docs view link for: {doc_desc}")
+                        # Look for view button in the first cell of this row
+                        # Try multiple selector strategies
+                        view_button_selectors = [
+                            'td:first-child span[role="button"][aria-label*="View"]',
+                            'td:first-child span[role="button"]',
+                            'td:first-child button',
+                            'td:first-child a',
+                        ]
+                        
+                        view_btn = None
+                        for selector in view_button_selectors:
                             try:
-                                # Try evaluate click directly on the locator
-                                self.logger.info(f"DEBUG: Trying evaluate click...")
-                                view_btn.evaluate('el => el.click()')
-                                clicked_view = True
-                                self.logger.info("DEBUG: Evaluate click succeeded, waiting...")
+                                buttons = row_locator.first.locator(selector)
+                                if buttons.count() > 0:
+                                    # Prefer non-mobile version (not in d-md-none)
+                                    non_mobile = row_locator.first.locator(f'td:first-child:not(.d-md-none) {selector}')
+                                    if non_mobile.count() > 0:
+                                        view_btn = non_mobile.first
+                                    else:
+                                        view_btn = buttons.first
+                                    self.logger.debug(f"Found view button using selector: {selector}")
+                                    break
                             except Exception as e:
-                                self.logger.info(f"DEBUG: Evaluate click failed: {e}")
-                                # Try dispatch_event
+                                self.logger.debug(f"Selector {selector} failed: {e}")
+                                continue
+
+                        if not view_btn:
+                            self.logger.warning(f"Could not find view button for: {doc_desc}")
+                            continue
+
+                        # Click the view button
+                        try:
+                            self.logger.debug(f"Clicking view button for: {doc_desc}")
+                            # Try regular click first
+                            try:
+                                view_btn.click(timeout=5000)
+                                clicked_view = True
+                            except Exception as e1:
+                                # Fallback to JavaScript click
+                                self.logger.debug(f"Regular click failed: {e1}, trying JavaScript click")
                                 try:
-                                    self.logger.info(f"DEBUG: Trying dispatch_event...")
+                                    view_btn.evaluate('el => el.click()')
+                                    clicked_view = True
+                                except Exception as e2:
+                                    # Last resort: dispatch event
+                                    self.logger.debug(f"JavaScript click failed: {e2}, trying dispatch event")
                                     view_btn.dispatch_event('click')
                                     clicked_view = True
-                                    self.logger.info("DEBUG: Dispatch event succeeded")
-                                except Exception as e2:
-                                    self.logger.info(f"DEBUG: Dispatch event failed: {e2}")
-
-                            time.sleep(3)  # Wait for page to load
-
-                            # Check if new page opened
-                            current_pages = self.page.context.pages
-                            self.logger.info(f"DEBUG: Pages before={initial_pages}, after={len(current_pages)}")
-                            if len(current_pages) > initial_pages:
-                                viewer_page = current_pages[-1]
-                                self.page = viewer_page
-                                self.logger.info(f"✓ Opened viewer in new page for {doc_desc}")
-                            else:
-                                # Check if URL changed (inline navigation)
-                                self.logger.info(f"DEBUG: Current URL: {self.page.url}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to click view button for {doc_desc}: {e}")
+                            continue
 
                         if not clicked_view:
                             self.logger.warning(f"Could not open viewer for extra document: {doc_desc}")
                             continue
 
-                        # Use the consolidated React PDF Viewer download helper
-                        if self._handle_react_pdf_viewer_download(filepath, viewer_page, doc_desc):
+                        # Wait for navigation/viewer to load
+                        time.sleep(2)  # Initial wait
+
+                        # Track if we navigated inline (same page, different URL)
+                        navigated_inline = False
+                        viewer_loaded = False
+                        
+                        # Check if new page opened
+                        current_pages = self.page.context.pages
+                        if len(current_pages) > initial_pages:
+                            # New page/popup opened
+                            viewer_page = current_pages[-1]
+                            self.page = viewer_page
+                            self.logger.info(f"✓ Opened viewer in new page for {doc_desc}")
+                            # Wait a bit more for viewer to initialize
+                            time.sleep(2)
+                            # Assume viewer is available when new page opens
+                            viewer_loaded = True
+                        elif self.page.url != current_url:
+                            # Current page navigated inline
+                            navigated_inline = True
+                            viewer_loaded = False
+                            self.logger.info(f"✓ Navigated to viewer page (inline): {self.page.url}")
+                            # Wait for React PDF Viewer to load on current page
+                            try:
+                                self.page.locator('.rpv-default-layout__container, .rpv-core__viewer').wait_for(
+                                    state='attached', timeout=15000
+                                )
+                                self.logger.info(f"✓ React PDF Viewer loaded inline for {doc_desc}")
+                                time.sleep(2)  # Additional wait for full render
+                                viewer_loaded = True
+                            except Exception as e:
+                                self.logger.warning(f"React PDF Viewer did not load within timeout: {e}")
+                                viewer_loaded = False
+                        else:
+                            # No navigation detected - wait for modal/overlay viewer
+                            self.logger.debug("No navigation detected, waiting for inline viewer/modal...")
+                            viewer_loaded = False
+                            try:
+                                # Wait for viewer container to appear
+                                self.page.locator('.rpv-default-layout__container, .rpv-core__viewer, .modal, [role="dialog"]').wait_for(
+                                    state='attached', timeout=10000
+                                )
+                                self.logger.info(f"✓ React PDF Viewer loaded (modal/overlay) for {doc_desc}")
+                                time.sleep(2)
+                                viewer_loaded = True
+                            except Exception as e:
+                                self.logger.warning(f"Viewer container did not appear: {e}")
+                                # Skip download if viewer didn't load
+                                self.logger.warning(f"Skipping download for {doc_desc} - viewer did not load")
+                                viewer_loaded = False
+
+                        # Use the consolidated React PDF Viewer download helper only if viewer loaded
+                        # viewer_page is set when a new page opened, navigated_inline is True when URL changed,
+                        # and viewer_loaded is True when viewer container appeared
+                        if viewer_page is not None or (navigated_inline and viewer_loaded) or viewer_loaded:
+                            download_success = self._handle_react_pdf_viewer_download(filepath, viewer_page, doc_desc)
+                        else:
+                            download_success = False
+                            self.logger.warning(f"Could not download {doc_desc} - no viewer detected")
+                        
+                        if download_success:
                             # Success!
                             self.seen_documents.add(doc_id)
                             self.logger.info(f"✓ Downloaded extra document: {filename}")
                         else:
                             self.logger.warning(f"Failed to download extra document: {doc_desc}")
 
-                        # Re-click Extra Documents tab to return to the list
-                        for selector in extra_docs_selectors:
-                            try:
-                                self.page.click(selector, timeout=3000)
-                                self.logger.debug("Re-clicked Extra Documents tab")
-                                time.sleep(1)
-                                break
-                            except:
-                                continue
+                        # Navigate back to Extra Documents tab to return to the list
+                        try:
+                            # If we navigated inline (same page, different URL), use browser back
+                            if navigated_inline:
+                                self.logger.debug("Navigating back (inline navigation detected)")
+                                try:
+                                    self.page.go_back()
+                                    time.sleep(2)
+                                    # Wait for page to load after going back
+                                    self.page.wait_for_load_state('networkidle', timeout=5000)
+                                except Exception as back_error:
+                                    self.logger.debug(f"Browser back failed: {back_error}")
+                            
+                            # Try to re-click Extra Documents tab
+                            # First check if we're on the right page
+                            current_url = self.page.url
+                            if 'viewDocument' in current_url:
+                                # Still on viewer page - go back
+                                try:
+                                    self.page.go_back()
+                                    time.sleep(2)
+                                except:
+                                    pass
+                            
+                            # Now try to click Extra Documents tab
+                            extra_docs_clicked = False
+                            for selector in extra_docs_selectors:
+                                try:
+                                    extra_docs_elem = self.page.locator(selector)
+                                    if extra_docs_elem.count() > 0:
+                                        extra_docs_elem.first.click(timeout=3000)
+                                        self.logger.debug("Re-clicked Extra Documents tab")
+                                        time.sleep(1)
+                                        extra_docs_clicked = True
+                                        break
+                                except Exception as e:
+                                    self.logger.debug(f"Failed to re-click Extra Documents with {selector}: {e}")
+                                    continue
+                            
+                            if not extra_docs_clicked:
+                                self.logger.debug("Could not re-click Extra Documents tab - may need to re-navigate to case")
+                        except Exception as nav_error:
+                            self.logger.debug(f"Error navigating back to Extra Documents: {nav_error}")
 
                         # Small delay between downloads
                         time.sleep(0.5)
@@ -1301,14 +1478,34 @@ class MiamiDadeCourtMonitor:
         try:
             # Extract case links (this method now handles page navigation)
             cases = self._extract_case_links()
+            # #region agent log
+            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'D','location':'deuker-monitor.py:1396','message':'Cases extracted before filtering','data':{'total_cases':len(cases),'case_numbers':[c['case_number'] for c in cases],'filter_case_number':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
+            # #endregion
 
             # Filter to specific case if requested
             if self.filter_case_number:
                 self.logger.info(f"Filtering to case: {self.filter_case_number}")
+                # #region agent log
+                with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                    import json as json_module
+                    f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A','location':'deuker-monitor.py:1401','message':'Before filtering comparison','data':{'filter_case_number':self.filter_case_number,'extracted_cases':[{'case_number':c['case_number'],'matches':c['case_number']==self.filter_case_number} for c in cases]},'timestamp':int(time.time()*1000)})+'\n')
+                # #endregion
                 cases = [c for c in cases if c['case_number'] == self.filter_case_number]
+                # #region agent log
+                with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                    import json as json_module
+                    f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A','location':'deuker-monitor.py:1401','message':'After filtering comparison','data':{'filter_case_number':self.filter_case_number,'filtered_count':len(cases),'filtered_cases':[c['case_number'] for c in cases]},'timestamp':int(time.time()*1000)})+'\n')
+                # #endregion
 
                 if not cases:
                     self.logger.warning(f"Case {self.filter_case_number} not found for {self.defendant_first_name} {self.defendant_last_name}")
+                    # #region agent log
+                    with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                        import json as json_module
+                        f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A','location':'deuker-monitor.py:1404','message':'Case not found after filtering','data':{'filter_case_number':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
+                    # #endregion
                     return results
 
                 self.logger.info(f"Found matching case: {self.filter_case_number}")
@@ -1328,6 +1525,7 @@ class MiamiDadeCourtMonitor:
                 # This is more reliable than trying to navigate back
                 if case_index > 0:
                     self.logger.info("Re-performing search to access case list...")
+                    self._take_screenshot(f"15-re-performing-search-case-{case_index}")
 
                     # Perform the full defendant search
                     if not self._perform_defendant_search():
@@ -1349,6 +1547,7 @@ class MiamiDadeCourtMonitor:
                             self.logger.debug(f"Trying to click defendant with: {selector}")
                             self.page.click(selector, timeout=5000)
                             self.logger.info(f"✓ Opened case list using: {selector}")
+                            self._take_screenshot(f"16-after-reclick-defendant-case-{case_index}")
                             clicked_defendant = True
                             time.sleep(2)
                             break
@@ -1358,6 +1557,7 @@ class MiamiDadeCourtMonitor:
 
                     if not clicked_defendant:
                         self.logger.error("Could not open case list")
+                        self._take_screenshot(f"16-error-reclick-defendant-case-{case_index}")
                         continue
 
                     # Verify the case list is visible
@@ -1369,6 +1569,8 @@ class MiamiDadeCourtMonitor:
                     else:
                         self.logger.warning("Case list table NOT visible!")
                         continue
+
+                # Fetch charges and docket entries
 
                 # Fetch charges and docket entries
                 charges, docket_entries = self._fetch_case_details(case_url, case_number)
@@ -1806,6 +2008,12 @@ def load_monitor_config(config_file, args):
     download_documents = args.download_documents if hasattr(args, 'download_documents') else True
     documents_dir = args.documents_dir if hasattr(args, 'documents_dir') else "court_documents"
     filter_case_number = args.case if hasattr(args, 'case') else ""
+    # #region agent log
+    with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+        import json as json_module
+        f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2007','message':'In load_monitor_config - args.case value','data':{'args_case':getattr(args,'case','NOT_SET'),'hasattr_case':hasattr(args,'case'),'filter_case_number_initial':filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
+    # #endregion
+    print(f"🔍 DEBUG: load_monitor_config - args.case = {getattr(args, 'case', 'NOT_SET')}, filter_case_number = {filter_case_number}")
 
     try:
         with open(config_file, 'r') as f:
@@ -1822,6 +2030,12 @@ def load_monitor_config(config_file, args):
             # Command-line --case flag overrides config file
             if not filter_case_number:
                 filter_case_number = config.get('filter_case_number', filter_case_number)
+            # #region agent log
+            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2029','message':'After config file load - filter_case_number','data':{'filter_case_number':filter_case_number,'config_has_filter':config.get('filter_case_number','NOT_IN_CONFIG')},'timestamp':int(time.time()*1000)})+'\n')
+            # #endregion
+            print(f"🔍 DEBUG: After config load - filter_case_number = {filter_case_number}, config has filter = {config.get('filter_case_number', 'NOT_IN_CONFIG')}")
     except FileNotFoundError:
         print(f"❌ Error: Config file '{config_file}' not found")
         return None
@@ -1964,8 +2178,18 @@ Config file format (config.json):
 
     if args.config:
         # Load configurations from config file(s)
+        # #region agent log
+        with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+            import json as json_module
+            f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2113','message':'Before load_monitor_config','data':{'args_case':getattr(args,'case','NOT_SET'),'args_all':getattr(args,'all',False),'config_files':args.config},'timestamp':int(time.time()*1000)})+'\n')
+        # #endregion
         for config_file in args.config:
             config = load_monitor_config(config_file, args)
+            # #region agent log
+            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2119','message':'After load_monitor_config','data':{'config_filter_case_number':config.get('filter_case_number','NOT_SET') if config else 'CONFIG_IS_NONE'},'timestamp':int(time.time()*1000)})+'\n')
+            # #endregion
             if config is None:
                 return 1
             monitor_configs.append(config)
@@ -2018,8 +2242,18 @@ Config file format (config.json):
             print("=" * 80)
 
             monitor = MiamiDadeCourtMonitor(**config)
+            # #region agent log
+            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                import json as json_module
+                f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2168','message':'Monitor created with config','data':{'filter_case_number':config.get('filter_case_number','NOT_SET'),'skip_state':config.get('skip_state',False),'all_keys':list(config.keys())},'timestamp':int(time.time()*1000)})+'\n')
+            # #endregion
             try:
                 monitor._init_browser()
+                # #region agent log
+                with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
+                    import json as json_module
+                    f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2171','message':'Before check_all_cases','data':{'monitor_filter_case_number':monitor.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
+                # #endregion
                 results = monitor.check_all_cases()
                 monitor.on_new_entries(results)
                 monitor.print_summary(results)
