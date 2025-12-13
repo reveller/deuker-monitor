@@ -1262,83 +1262,93 @@ class MiamiDadeCourtMonitor:
                         # Extra Documents uses a different structure than Dockets
                         clicked_view = False
                         viewer_page = None
-                        initial_pages = len(self.page.context.pages)
-                        current_url = self.page.url
+                        initial_pages = 0  # Will be set when button is found
+                        current_url = ""   # Will be set when button is found
 
                         self.logger.debug(f"Looking for Extra Doc view button for: {doc_desc}")
 
-                        # Find the row containing this document description
-                        # Use a more flexible selector that works with any document name
-                        doc_desc_short = doc_desc[:50].strip()  # Use first 50 chars for matching
-                        row_locator = self.page.locator(f'table tr:has-text("{doc_desc_short}")')
-                        
-                        if row_locator.count() == 0:
-                            # Try with just first few words
-                            first_words = ' '.join(doc_desc.split()[:3])
-                            row_locator = self.page.locator(f'table tr:has-text("{first_words}")')
-                        
-                        if row_locator.count() == 0:
-                            self.logger.warning(f"Could not find row for document: {doc_desc}")
-                            continue
+                        # Use same approach as working Dockets code
+                        # Find all table rows and look for the one containing our document description
+                        desc_search = doc_desc[:30].strip()  # Use first 30 chars for matching
+                        self.logger.debug(f"Looking for row with description: {desc_search}")
 
-                        # Look for view button in the first cell of this row
-                        # Try multiple selector strategies
-                        view_button_selectors = [
-                            'td:first-child span[role="button"][aria-label*="View"]',
-                            'td:first-child span[role="button"]',
-                            'td:first-child button',
-                            'td:first-child a',
-                        ]
-                        
-                        view_btn = None
-                        for selector in view_button_selectors:
-                            try:
-                                buttons = row_locator.first.locator(selector)
-                                if buttons.count() > 0:
-                                    # Prefer non-mobile version (not in d-md-none)
-                                    non_mobile = row_locator.first.locator(f'td:first-child:not(.d-md-none) {selector}')
-                                    if non_mobile.count() > 0:
-                                        view_btn = non_mobile.first
-                                    else:
-                                        view_btn = buttons.first
-                                    self.logger.debug(f"Found view button using selector: {selector}")
+                        rows = self.page.locator('table tr')
+                        view_btn_found = False
+
+                        for i in range(rows.count()):
+                            row = rows.nth(i)
+                            row_text = row.inner_text()
+
+                            # Check if this row contains the document description
+                            if desc_search in row_text:
+                                self.logger.debug(f"Found matching row for Extra Doc: {doc_desc}")
+
+                                # Look for view buttons - try multiple selector strategies
+                                # Extra Documents may use different aria-labels than Dockets
+                                view_button_selectors = [
+                                    'span[role="button"][aria-label*="View"]',
+                                    'span[role="button"]',
+                                    'button[aria-label*="View"]',
+                                    'button',
+                                    'a[href*="viewDocument"]',
+                                ]
+
+                                for selector in view_button_selectors:
+                                    try:
+                                        view_buttons = row.locator(selector)
+                                        button_count = view_buttons.count()
+
+                                        if button_count > 0:
+                                            self.logger.debug(f"Found {button_count} buttons with selector '{selector}' in Extra Doc row")
+
+                                            # Get current state before clicking
+                                            initial_pages = len(self.page.context.pages)
+                                            current_url = self.page.url
+
+                                            # Scroll the row into view
+                                            try:
+                                                row.scroll_into_view_if_needed()
+                                                time.sleep(0.5)
+                                            except:
+                                                pass
+
+                                            # Try to click the last button (usually desktop version)
+                                            try:
+                                                last_btn = view_buttons.last
+                                                last_btn.scroll_into_view_if_needed()
+                                                time.sleep(0.5)
+
+                                                # Use dispatch_event like Dockets code (proven to work)
+                                                self.logger.debug(f"Clicking Extra Doc view button with dispatch_event...")
+                                                self.logger.debug(f"DEBUG: Before click - URL: {current_url}, Pages: {initial_pages}")
+                                                last_btn.dispatch_event('click', {'bubbles': True, 'cancelable': True})
+                                                clicked_view = True
+                                                view_btn_found = True
+                                                self.logger.info(f"✓ Clicked Extra Doc view button for: {doc_desc}")
+
+                                                # Wait for viewer to start loading
+                                                time.sleep(3)  # Longer wait for viewer initialization
+
+                                                # Debug: Check what happened after click
+                                                self.logger.debug(f"DEBUG: After click - URL: {self.page.url}, Pages: {len(self.page.context.pages)}")
+                                                self._take_screenshot(f"14z-after-extra-doc-click-{case_number}")
+                                                break
+                                            except Exception as click_error:
+                                                self.logger.debug(f"Click failed with selector '{selector}': {click_error}")
+                                                continue
+                                    except Exception as e:
+                                        self.logger.debug(f"Selector {selector} failed: {e}")
+                                        continue
+
+                                if view_btn_found:
                                     break
-                            except Exception as e:
-                                self.logger.debug(f"Selector {selector} failed: {e}")
-                                continue
 
-                        if not view_btn:
-                            self.logger.warning(f"Could not find view button for: {doc_desc}")
+                        if not view_btn_found:
+                            self.logger.warning(f"Could not find/click view button for: {doc_desc}")
                             continue
 
-                        # Click the view button
-                        try:
-                            self.logger.debug(f"Clicking view button for: {doc_desc}")
-                            # Try regular click first
-                            try:
-                                view_btn.click(timeout=5000)
-                                clicked_view = True
-                            except Exception as e1:
-                                # Fallback to JavaScript click
-                                self.logger.debug(f"Regular click failed: {e1}, trying JavaScript click")
-                                try:
-                                    view_btn.evaluate('el => el.click()')
-                                    clicked_view = True
-                                except Exception as e2:
-                                    # Last resort: dispatch event
-                                    self.logger.debug(f"JavaScript click failed: {e2}, trying dispatch event")
-                                    view_btn.dispatch_event('click')
-                                    clicked_view = True
-                        except Exception as e:
-                            self.logger.error(f"Failed to click view button for {doc_desc}: {e}")
-                            continue
-
-                        if not clicked_view:
-                            self.logger.warning(f"Could not open viewer for extra document: {doc_desc}")
-                            continue
-
-                        # Wait for navigation/viewer to load
-                        time.sleep(2)  # Initial wait
+                        # Wait additional time for viewer to load
+                        time.sleep(2)
 
                         # Track if we navigated inline (same page, different URL)
                         navigated_inline = False
@@ -1355,6 +1365,7 @@ class MiamiDadeCourtMonitor:
                             time.sleep(2)
                             # Assume viewer is available when new page opens
                             viewer_loaded = True
+                            self._take_screenshot(f"14a-after-extra-documents-viewer-loaded-{case_number}")
                         elif self.page.url != current_url:
                             # Current page navigated inline
                             navigated_inline = True
@@ -1368,25 +1379,43 @@ class MiamiDadeCourtMonitor:
                                 self.logger.info(f"✓ React PDF Viewer loaded inline for {doc_desc}")
                                 time.sleep(2)  # Additional wait for full render
                                 viewer_loaded = True
+                                self._take_screenshot(f"14b-after-extra-documents-viewer-loaded-{case_number}")
                             except Exception as e:
+                                self._take_screenshot(f"14e-failed-extra-documents-viewer-loaded-{case_number}")
                                 self.logger.warning(f"React PDF Viewer did not load within timeout: {e}")
                                 viewer_loaded = False
                         else:
-                            # No navigation detected - wait for modal/overlay viewer
-                            self.logger.debug("No navigation detected, waiting for inline viewer/modal...")
+                            # No navigation detected - wait for viewer to load inline
+                            # This matches the Dockets code approach
+                            self.logger.debug("No navigation detected, waiting for React PDF Viewer to load...")
                             viewer_loaded = False
                             try:
-                                # Wait for viewer container to appear
-                                self.page.locator('.rpv-default-layout__container, .rpv-core__viewer, .modal, [role="dialog"]').wait_for(
-                                    state='attached', timeout=10000
+                                # Wait for the viewer container to appear (React PDF Viewer takes time to render)
+                                # Use same timeout as Dockets code (15 seconds)
+                                self.page.locator('.rpv-default-layout__container, .rpv-core__viewer').wait_for(
+                                    state='attached', timeout=15000
                                 )
-                                self.logger.info(f"✓ React PDF Viewer loaded (modal/overlay) for {doc_desc}")
+                                self.logger.info(f"✓ React PDF Viewer loaded inline for {doc_desc}")
+                                # Wait an additional moment for full render
                                 time.sleep(2)
                                 viewer_loaded = True
+                                self._take_screenshot(f"14c-after-extra-documents-viewer-loaded-{case_number}")
                             except Exception as e:
-                                self.logger.warning(f"Viewer container did not appear: {e}")
-                                # Skip download if viewer didn't load
-                                self.logger.warning(f"Skipping download for {doc_desc} - viewer did not load")
+                                self._take_screenshot(f"14d-failed-extra-documents-viewer-loaded-{case_number}")
+                                self.logger.warning(f"React PDF Viewer did not load within timeout: {e}")
+
+                                # Try to extract PDF URL from page source as fallback (like Dockets code)
+                                try:
+                                    self.logger.debug("Attempting to find PDF URL directly in page source...")
+                                    pdf_url_pattern = r'(https?://[^\s<>"]+\.pdf[^\s<>"]*|/cjis/[^\s<>"]*viewDocument[^\s<>"]*)'
+                                    page_content = self.page.content()
+                                    import re as re_module
+                                    pdf_urls = re_module.findall(pdf_url_pattern, page_content)
+                                    if pdf_urls:
+                                        self.logger.debug(f"Found potential PDF URLs: {pdf_urls[:3]}")
+                                except:
+                                    pass
+
                                 viewer_loaded = False
 
                         # Use the consolidated React PDF Viewer download helper only if viewer loaded
