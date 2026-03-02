@@ -61,6 +61,18 @@ class CaseInfo:
     last_checked: str
 
 
+@dataclass
+class IceDetaineeStatus:
+    """Represents ICE detainee locator status"""
+    full_name: str
+    country_of_birth: str
+    status: str              # e.g., "In ICE Custody"
+    state: str               # e.g., "CA"
+    detention_facility: str  # e.g., "CALIFORNIA CITY CORRECTIONS CENTER"
+    last_checked: str
+    first_seen: str
+
+
 class MiamiDadeCourtMonitor:
     """Monitor Miami-Dade court cases for docket updates"""
     
@@ -79,7 +91,21 @@ class MiamiDadeCourtMonitor:
                  notification_email: str = "",
                  download_documents: bool = True,
                  documents_dir: str = "court_documents",
-                 filter_case_number: str = ""):
+                 filter_case_number: str = "",
+                 enable_screenshots: bool = False,
+                 smtp_server: str = "",
+                 smtp_port: int = 587,
+                 smtp_username: str = "",
+                 smtp_password: str = "",
+                 smtp_from_address: str = "",
+                 twilio_account_sid: str = "",
+                 twilio_auth_token: str = "",
+                 twilio_phone_number: str = "",
+                 ice_monitoring: bool = False,
+                 country_of_birth: str = "",
+                 dob_month: str = "",
+                 dob_day: str = "",
+                 dob_year: str = ""):
         """
         Initialize the monitor
 
@@ -96,6 +122,15 @@ class MiamiDadeCourtMonitor:
             download_documents: Automatically download court documents (default: True)
             documents_dir: Directory to store downloaded documents (default: court_documents)
             filter_case_number: Monitor only this specific case number (e.g., F-25-024652 or F25024652)
+            enable_screenshots: Enable debug screenshots (default: False)
+            smtp_server: SMTP server for email (e.g., smtp.gmail.com)
+            smtp_port: SMTP port (default: 587)
+            smtp_username: SMTP username
+            smtp_password: SMTP password
+            smtp_from_address: SMTP from address (defaults to smtp_username)
+            twilio_account_sid: Twilio Account SID for SMS
+            twilio_auth_token: Twilio Auth Token for SMS
+            twilio_phone_number: Twilio phone number for SMS
         """
         self.defendant_first_name = defendant_first_name
         self.defendant_last_name = defendant_last_name
@@ -112,11 +147,34 @@ class MiamiDadeCourtMonitor:
         self.notification_email = notification_email
         self.download_documents = download_documents
         self.documents_dir = Path(documents_dir)
+        self.enable_screenshots = enable_screenshots
         self.screenshots_dir = Path("screenshots")
         self.screenshot_counter = 0
 
-        # Create screenshots directory
-        self.screenshots_dir.mkdir(exist_ok=True)
+        # SMTP configuration
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self.smtp_username = smtp_username
+        self.smtp_password = smtp_password
+        self.smtp_from_address = smtp_from_address or smtp_username
+
+        # Twilio configuration
+        self.twilio_account_sid = twilio_account_sid
+        self.twilio_auth_token = twilio_auth_token
+        self.twilio_phone_number = twilio_phone_number
+
+        # ICE detainee locator configuration
+        self.ice_monitoring = ice_monitoring
+        self.country_of_birth = country_of_birth
+        self.dob_month = dob_month
+        self.dob_day = dob_day
+        self.dob_year = dob_year
+        self.ice_status: Optional[IceDetaineeStatus] = None
+        self.ice_check_failures: int = 0
+
+        # Create screenshots directory if screenshots are enabled
+        if self.enable_screenshots:
+            self.screenshots_dir.mkdir(exist_ok=True)
 
         # Set up logging first (needed by _normalize_case_number)
         logging.basicConfig(
@@ -202,6 +260,11 @@ class MiamiDadeCourtMonitor:
                     # Reconstruct case_info
                     for case_num, case_data in data.get('case_info', {}).items():
                         self.case_info[case_num] = CaseInfo(**case_data)
+                    # Reconstruct ICE status
+                    ice_data = data.get('ice_status')
+                    if ice_data:
+                        self.ice_status = IceDetaineeStatus(**ice_data)
+                    self.ice_check_failures = data.get('ice_check_failures', 0)
                 self.logger.info(f"Loaded {len(self.seen_charges)} seen charges, "
                                f"{len(self.seen_dockets)} seen dockets, "
                                f"{len(self.seen_documents)} downloaded documents, "
@@ -228,7 +291,9 @@ class MiamiDadeCourtMonitor:
                 'last_updated': datetime.now().isoformat(),
                 'defendant_first_name': self.defendant_first_name,
                 'defendant_last_name': self.defendant_last_name,
-                'defendant_sex': self.defendant_sex
+                'defendant_sex': self.defendant_sex,
+                'ice_status': asdict(self.ice_status) if self.ice_status else None,
+                'ice_check_failures': self.ice_check_failures
             }
             with open(self.data_file, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -252,13 +317,16 @@ class MiamiDadeCourtMonitor:
     def _take_screenshot(self, description: str = ""):
         """
         Take a screenshot and save it to the screenshots directory
-        
+
         Args:
             description: Description of what action was performed (used in filename)
         """
+        if not self.enable_screenshots:
+            return
+
         if not self.page:
             return
-        
+
         try:
             self.screenshot_counter += 1
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -560,7 +628,7 @@ class MiamiDadeCourtMonitor:
 
         return cases
     
-    def _fetch_case_details(self, case_url: str, case_number: str) -> tuple[List[Charge], List[DocketEntry]]:
+    def _fetch_case_details(self, case_url: str, case_number: str) -> tuple[List[Charge], List[DocketEntry], int, int]:
         """
         Fetch all charges and docket entries for a specific case
 
@@ -569,10 +637,12 @@ class MiamiDadeCourtMonitor:
             case_number: Case number for reference
 
         Returns:
-            Tuple of (charges_list, dockets_list)
+            Tuple of (charges_list, dockets_list, new_documents_count, total_documents_count)
         """
         charges = []
         dockets = []
+        new_documents_count = 0
+        total_documents_count = 0
 
         try:
             # Click on the case number link to view docket details
@@ -790,29 +860,39 @@ class MiamiDadeCourtMonitor:
 
             # Download documents if enabled and documents are available
             if self.download_documents and any(d.has_document for d in dockets):
-                self._download_case_documents(case_number, dockets)
+                new_docs, total_docs = self._download_case_documents(case_number, dockets)
+                new_documents_count += new_docs
+                total_documents_count += total_docs
 
             # Check for "Extra Documents" tab
             if self.download_documents:
-                self._check_extra_documents_tab(case_number)
+                new_docs, total_docs = self._check_extra_documents_tab(case_number)
+                new_documents_count += new_docs
+                total_documents_count += total_docs
 
         except Exception as e:
             self.logger.error(f"Error fetching case details for {case_number}: {e}")
             import traceback
             self.logger.debug(traceback.format_exc())
 
-        return charges, dockets
+        return charges, dockets, new_documents_count, total_documents_count
 
-    def _download_case_documents(self, case_number: str, dockets: List[DocketEntry]):
+    def _download_case_documents(self, case_number: str, dockets: List[DocketEntry]) -> tuple[int, int]:
         """
         Download documents for dockets that have them available
 
         Args:
             case_number: The case number
             dockets: List of docket entries to check for documents
+
+        Returns:
+            Tuple of (new_documents_count, total_documents_count)
         """
         import os
         import re
+
+        new_documents_count = 0
+        total_documents_count = 0
 
         self.logger.info(f"Checking for documents to download in {case_number}...")
 
@@ -843,6 +923,9 @@ class MiamiDadeCourtMonitor:
             if not docket.has_document:
                 continue
 
+            # Count this document (whether new or already seen)
+            total_documents_count += 1
+
             # Create a unique identifier for this document
             doc_id = f"{case_number}_{docket.din}_{docket.docket_description}"
 
@@ -851,24 +934,31 @@ class MiamiDadeCourtMonitor:
                 self.logger.debug(f"Document already downloaded: {doc_id}")
                 continue
 
+            # This is a new document
+            new_documents_count += 1
+
             try:
-                # Generate safe filename: case_number-docket_description.pdf
+                # Create case-specific subdirectory
+                case_dir = self.documents_dir / case_number
+                case_dir.mkdir(parents=True, exist_ok=True)
+
+                # Generate safe filename: docket_description.pdf (no need for case_number prefix since it's in folder)
                 # Clean docket description to be filesystem-safe
                 safe_desc = re.sub(r'[^\w\s-]', '', docket.docket_description)
                 safe_desc = re.sub(r'[-\s]+', '-', safe_desc)
                 safe_desc = safe_desc[:100]  # Limit length
-                filename = f"{case_number}-{safe_desc}.pdf"
-                filepath = self.documents_dir / filename
+                filename = f"{safe_desc}.pdf"
+                filepath = case_dir / filename
 
                 # If file already exists, add a counter
                 counter = 1
                 original_filepath = filepath
                 while filepath.exists():
-                    filename = f"{case_number}-{safe_desc}-{counter}.pdf"
-                    filepath = self.documents_dir / filename
+                    filename = f"{safe_desc}-{counter}.pdf"
+                    filepath = case_dir / filename
                     counter += 1
 
-                self.logger.info(f"Downloading document for Din {docket.din}: {filename}")
+                self.logger.info(f"Downloading document for Din {docket.din}: {case_number}/{filename}")
 
                 # Strategy: Click "View Image" button, wait for viewer, click download button
                 self.logger.debug(f"Attempting to open document viewer for Din {docket.din}")
@@ -1040,6 +1130,8 @@ class MiamiDadeCourtMonitor:
                 except Exception as cleanup_error:
                     self.logger.debug(f"Error cleaning up pages: {cleanup_error}")
 
+        return new_documents_count, total_documents_count
+
     def _handle_react_pdf_viewer_download(self, filepath, viewer_page=None, doc_label="document") -> bool:
         """
         Handle React PDF Viewer interaction and download after view button is clicked.
@@ -1141,9 +1233,16 @@ class MiamiDadeCourtMonitor:
             self.logger.error(f"Error in React PDF Viewer download for {doc_label}: {e}")
             return False
 
-    def _check_extra_documents_tab(self, case_number: str):
-        """Check and download documents from the Extra Documents tab if it exists"""
+    def _check_extra_documents_tab(self, case_number: str) -> tuple[int, int]:
+        """Check and download documents from the Extra Documents tab if it exists
+
+        Returns:
+            Tuple of (new_documents_count, total_documents_count)
+        """
         import re
+
+        new_documents_count = 0
+        total_documents_count = 0
 
         try:
             self.logger.debug(f"Checking for Extra Documents tab in {case_number}...")
@@ -1152,7 +1251,7 @@ class MiamiDadeCourtMonitor:
             html = self.page.content()
             if 'EXTRA DOCUMENTS' not in html.upper():
                 self.logger.debug("No Extra Documents tab found")
-                return
+                return new_documents_count, total_documents_count
 
             # Try to click on Extra Documents tab
             extra_docs_selectors = [
@@ -1179,7 +1278,7 @@ class MiamiDadeCourtMonitor:
             if not clicked:
                 self.logger.debug("Could not click Extra Documents tab")
                 self._take_screenshot(f"14-extra-documents-not-clickable-{case_number}")
-                return
+                return new_documents_count, total_documents_count
 
             # Parse the Extra Documents table
             html = self.page.content()
@@ -1203,7 +1302,7 @@ class MiamiDadeCourtMonitor:
 
             if not extra_docs_table:
                 self.logger.debug("Could not find Extra Documents table")
-                return
+                return new_documents_count, total_documents_count
 
             rows = extra_docs_table.find_all('tr')
             self.logger.info(f"Found {len(rows)-1} row(s) in Extra Documents table")
@@ -1217,6 +1316,9 @@ class MiamiDadeCourtMonitor:
                         if not (view_cell.find('img') or view_cell.find('a') or view_cell.find('svg') or
                                 view_cell.find('span', {'role': 'button'})):
                             continue
+
+                        # Count this document (whether new or already seen)
+                        total_documents_count += 1
 
                         # Get document description from the last column
                         doc_desc = ""
@@ -1242,21 +1344,28 @@ class MiamiDadeCourtMonitor:
                             self.logger.debug(f"Extra document already downloaded: {doc_id}")
                             continue
 
-                        # Generate safe filename
+                        # This is a new document
+                        new_documents_count += 1
+
+                        # Create case-specific subdirectory
+                        case_dir = self.documents_dir / case_number
+                        case_dir.mkdir(parents=True, exist_ok=True)
+
+                        # Generate safe filename (no need for case_number prefix since it's in folder)
                         safe_desc = re.sub(r'[^\w\s-]', '', doc_desc)
                         safe_desc = re.sub(r'[-\s]+', '-', safe_desc)
                         safe_desc = safe_desc[:100]
-                        filename = f"{case_number}-{safe_desc}.pdf"
-                        filepath = self.documents_dir / filename
+                        filename = f"{safe_desc}.pdf"
+                        filepath = case_dir / filename
 
                         # Handle duplicate filenames
                         counter = 1
                         while filepath.exists():
-                            filename = f"{case_number}-{safe_desc}-{counter}.pdf"
-                            filepath = self.documents_dir / filename
+                            filename = f"{safe_desc}-{counter}.pdf"
+                            filepath = case_dir / filename
                             counter += 1
 
-                        self.logger.info(f"Downloading extra document: {filename}")
+                        self.logger.info(f"Downloading extra document: {case_number}/{filename}")
 
                         # For Extra Documents, find and click view button by looking for SVG icon
                         # Extra Documents uses a different structure than Dockets
@@ -1430,7 +1539,7 @@ class MiamiDadeCourtMonitor:
                         if download_success:
                             # Success!
                             self.seen_documents.add(doc_id)
-                            self.logger.info(f"✓ Downloaded extra document: {filename}")
+                            self.logger.info(f"✓ Downloaded extra document: {case_number}/{filename}")
                         else:
                             self.logger.warning(f"Failed to download extra document: {doc_desc}")
 
@@ -1488,6 +1597,529 @@ class MiamiDadeCourtMonitor:
         except Exception as e:
             self.logger.debug(f"Error checking Extra Documents tab: {e}")
 
+        return new_documents_count, total_documents_count
+
+    def _check_ice_status(self) -> Optional[IceDetaineeStatus]:
+        """
+        Check ICE detainee locator for current status.
+        Opens a new browser page to avoid interfering with court monitor page.
+        """
+        if not self.ice_monitoring:
+            return None
+
+        driver = None
+        try:
+            self.logger.info("Checking ICE detainee locator...")
+            import undetected_chromedriver as uc
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait, Select
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.action_chains import ActionChains
+
+            options = uc.ChromeOptions()
+            # ICE site WAF blocks headless browsers, so always run non-headless
+            # The window will briefly appear on screen during checks
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+
+            driver = uc.Chrome(options=options, version_main=145)
+            driver.get("https://locator.ice.gov/odls/#/search")
+
+            # Wait for Angular app to load
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input, form, app-root"))
+            )
+            # Wait for reCAPTCHA v3 to fully load and build a baseline score
+            time.sleep(5)
+
+            # Simulate human-like page interaction to boost reCAPTCHA score
+            actions = ActionChains(driver)
+            # Move mouse around the page naturally
+            actions.move_by_offset(400, 300).pause(0.5)
+            actions.move_by_offset(-100, 50).pause(0.3)
+            actions.perform()
+
+            if self.enable_screenshots:
+                driver.save_screenshot(str(self.screenshots_dir / "ice_01_search_page.png"))
+
+            # Check for access denied
+            if "Access Denied" in driver.page_source:
+                self.logger.error("ICE locator: Access Denied by WAF")
+                return None
+
+            # Fill in last name
+            last_name_selectors = [
+                (By.ID, "lastName"),
+                (By.CSS_SELECTOR, 'input[formcontrolname="lastName"]'),
+                (By.CSS_SELECTOR, 'input[name="lastName"]'),
+                (By.CSS_SELECTOR, 'input[placeholder*="Last"]'),
+            ]
+            last_name_input = None
+            for by, selector in last_name_selectors:
+                try:
+                    last_name_input = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((by, selector))
+                    )
+                    if last_name_input:
+                        break
+                except Exception:
+                    continue
+
+            if not last_name_input:
+                self.logger.error("Could not find last name input")
+                if self.enable_screenshots:
+                    driver.save_screenshot(str(self.screenshots_dir / "ice_error_no_form.png"))
+                return None
+
+            last_name_input.clear()
+            last_name_input.send_keys(self.defendant_last_name)
+            time.sleep(0.5)
+
+            # Fill in first name
+            first_name_selectors = [
+                (By.ID, "firstName"),
+                (By.CSS_SELECTOR, 'input[formcontrolname="firstName"]'),
+                (By.CSS_SELECTOR, 'input[name="firstName"]'),
+                (By.CSS_SELECTOR, 'input[placeholder*="First"]'),
+            ]
+            for by, selector in first_name_selectors:
+                try:
+                    first_name_input = driver.find_element(by, selector)
+                    first_name_input.clear()
+                    first_name_input.send_keys(self.defendant_first_name)
+                    break
+                except Exception:
+                    continue
+            time.sleep(0.5)
+
+            # Scroll down to reveal the bio search form
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2)")
+            time.sleep(1)
+
+            # Select country of birth from dropdown (in the Bio section, not A-Number section)
+            if self.country_of_birth:
+                # The page has TWO country dropdowns - one for A-Number, one for Bio search
+                # We need the second one (Bio search section)
+                cob_selectors = [
+                    (By.CSS_SELECTOR, 'b-search select'),
+                    (By.CSS_SELECTOR, 'select[formcontrolname="country"]'),
+                    (By.XPATH, '(//select[contains(@class,"form-control") or contains(@class,"form-select")])[last()]'),
+                    (By.XPATH, '//b-search//select'),
+                ]
+                cob_selected = False
+                for by, selector in cob_selectors:
+                    try:
+                        select_el = driver.find_element(by, selector)
+                        Select(select_el).select_by_visible_text(self.country_of_birth)
+                        self.logger.info(f"Selected country using: {selector}")
+                        cob_selected = True
+                        break
+                    except Exception as e:
+                        self.logger.debug(f"Country selector {selector} failed: {e}")
+                        continue
+
+                if not cob_selected:
+                    # Fallback: try all select elements and pick the one in bio section
+                    try:
+                        selects = driver.find_elements(By.TAG_NAME, 'select')
+                        for sel in selects:
+                            try:
+                                options = [o.text for o in sel.find_elements(By.TAG_NAME, 'option')]
+                                if any(self.country_of_birth in o for o in options):
+                                    Select(sel).select_by_visible_text(self.country_of_birth)
+                                    self.logger.info("Selected country using fallback select scan")
+                                    cob_selected = True
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                if not cob_selected:
+                    self.logger.warning(f"Could not select country of birth: {self.country_of_birth}")
+
+                time.sleep(0.5)
+
+            # Fill optional DOB fields
+            if self.dob_month:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, 'select[formcontrolname="month"], #month')
+                    Select(el).select_by_value(self.dob_month)
+                except Exception:
+                    pass
+            if self.dob_day:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, 'select[formcontrolname="day"], #day')
+                    Select(el).select_by_value(self.dob_day)
+                except Exception:
+                    pass
+            if self.dob_year:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, 'select[formcontrolname="year"], #year, app-years select')
+                    Select(el).select_by_visible_text(self.dob_year)
+                except Exception:
+                    pass
+
+            if self.enable_screenshots:
+                driver.save_screenshot(str(self.screenshots_dir / "ice_02_form_filled.png"))
+
+            # Scroll to bottom to reveal search button and let reCAPTCHA fully initialize
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(3)
+
+            # Click search button using JavaScript to avoid click intercept issues
+            search_selectors = [
+                (By.XPATH, '//button[contains(text(), "Search by Biographical")]'),
+                (By.XPATH, '//b-search//button[contains(text(), "Search")]'),
+                (By.CSS_SELECTOR, 'b-search button[type="submit"]'),
+                (By.CSS_SELECTOR, 'b-search button'),
+                (By.XPATH, '//button[contains(text(), "Search") and not(contains(text(), "A-Number"))]'),
+            ]
+            search_clicked = False
+            for by, selector in search_selectors:
+                try:
+                    btn = driver.find_element(by, selector)
+                    driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", btn)
+                    search_clicked = True
+                    self.logger.debug(f"Clicked search using: {selector}")
+                    break
+                except Exception:
+                    continue
+
+            if not search_clicked:
+                self.logger.error("Could not click ICE search button")
+                if self.enable_screenshots:
+                    driver.save_screenshot(str(self.screenshots_dir / "ice_error_no_search_button.png"))
+                return None
+
+            # Wait for results
+            time.sleep(8)
+
+            if self.enable_screenshots:
+                driver.save_screenshot(str(self.screenshots_dir / "ice_03_results.png"))
+
+            # Parse results
+            html = driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
+            page_text = soup.get_text().lower()
+
+            # Check for internal error (reCAPTCHA failure)
+            if 'internal error' in page_text:
+                self.logger.warning("ICE locator: Internal Error (likely reCAPTCHA failure), retrying...")
+                try:
+                    # Full page reload to get fresh reCAPTCHA token
+                    driver.get("https://locator.ice.gov/odls/#/search")
+                    time.sleep(8)  # Long wait for reCAPTCHA v3 to build score
+
+                    # Human-like mouse movements
+                    actions = ActionChains(driver)
+                    actions.move_by_offset(300, 200).pause(1)
+                    actions.move_by_offset(50, 100).pause(0.5)
+                    actions.perform()
+
+                    # Re-fill the form with natural typing delays
+                    for by, selector in last_name_selectors:
+                        try:
+                            last_name_input = WebDriverWait(driver, 5).until(
+                                EC.presence_of_element_located((by, selector))
+                            )
+                            if last_name_input:
+                                break
+                        except Exception:
+                            continue
+                    if last_name_input:
+                        last_name_input.click()
+                        time.sleep(0.3)
+                        last_name_input.clear()
+                        for char in self.defendant_last_name:
+                            last_name_input.send_keys(char)
+                            time.sleep(0.05)
+                        time.sleep(0.5)
+
+                    for by, selector in first_name_selectors:
+                        try:
+                            fi = driver.find_element(by, selector)
+                            fi.click()
+                            time.sleep(0.3)
+                            fi.clear()
+                            for char in self.defendant_first_name:
+                                fi.send_keys(char)
+                                time.sleep(0.05)
+                            break
+                        except Exception:
+                            continue
+                    time.sleep(0.5)
+
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2)")
+                    time.sleep(2)
+                    if self.country_of_birth:
+                        try:
+                            sel = driver.find_element(By.CSS_SELECTOR, 'b-search select')
+                            Select(sel).select_by_visible_text(self.country_of_birth)
+                        except Exception:
+                            pass
+                    time.sleep(1)
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(5)
+
+                    for by, selector in search_selectors:
+                        try:
+                            btn = driver.find_element(by, selector)
+                            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", btn)
+                            break
+                        except Exception:
+                            continue
+                    time.sleep(8)
+                    if self.enable_screenshots:
+                        driver.save_screenshot(str(self.screenshots_dir / "ice_04_retry_results.png"))
+
+                    html = driver.page_source
+                    soup = BeautifulSoup(html, 'html.parser')
+                    page_text = soup.get_text().lower()
+                    if 'internal error' in page_text:
+                        self.logger.error("ICE locator: Internal Error persists after retry")
+                        return None
+                except Exception as retry_err:
+                    self.logger.error(f"ICE retry failed: {retry_err}")
+                    return None
+
+            if 'no records found' in page_text or 'no results' in page_text or '0 results' in page_text:
+                self.logger.info("ICE locator: No records found")
+                return None
+
+            result = self._parse_ice_results_selenium(soup, driver)
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Error checking ICE detainee locator: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            if self.enable_screenshots and driver:
+                try:
+                    driver.save_screenshot(str(self.screenshots_dir / "ice_error_exception.png"))
+                except Exception:
+                    pass
+            return None
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+    def _parse_ice_results_selenium(self, soup: BeautifulSoup, driver) -> Optional[IceDetaineeStatus]:
+        """Parse ICE detainee locator results page using Selenium driver"""
+        from selenium.webdriver.common.by import By
+        now = datetime.now().isoformat()
+
+        # The ICE results page displays data in a "label : value" text format:
+        #   RICARDO ULRICH DEUKER
+        #   Country of Birth : Germany
+        #   Status : In ICE Custody
+        #   State: CA
+        #   Current Detention Facility: CALIFORNIA CITY CORRECTIONS CENTER
+        try:
+            body_text = driver.find_element(By.TAG_NAME, 'body').text
+        except Exception:
+            self.logger.info("ICE locator: Could not get page text")
+            return None
+
+        if self.defendant_last_name.upper() not in body_text.upper():
+            self.logger.info("ICE locator: Defendant name not found in results")
+            return None
+
+        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+
+        # Debug: log the lines around the name for selector tuning
+        self.logger.debug(f"ICE results page lines: {lines}")
+
+        # Find the name line and extract fields from surrounding lines
+        full_name = ""
+        country = self.country_of_birth
+        status = ""
+        state = ""
+        facility = ""
+
+        for i, line in enumerate(lines):
+            # The name appears as a standalone line in ALL CAPS
+            if self.defendant_last_name.upper() in line.upper() and ':' not in line and 'search' not in line.lower():
+                full_name = line.strip()
+                continue
+
+            # Parse "Label : Value" or "Label: Value" or "Label :Value" lines
+            # Handle spaces around colon: "Status : In ICE Custody" or "Status: In ICE Custody"
+            line_lower = line.lower().strip()
+            if 'country of birth' in line_lower and ':' in line:
+                country = line.split(':', 1)[-1].strip()
+            elif re.match(r'^status\s*:', line_lower):
+                status = line.split(':', 1)[-1].strip()
+            elif re.match(r'^state\s*:', line_lower):
+                state = line.split(':', 1)[-1].strip()
+            elif 'detention facility' in line_lower and ':' in line:
+                facility = line.split(':', 1)[-1].strip()
+
+        if full_name:
+            self.logger.info(f"ICE: Found {full_name} - Status: {status}, State: {state}, Facility: {facility}")
+            return IceDetaineeStatus(
+                full_name=full_name,
+                country_of_birth=country,
+                status=status,
+                state=state,
+                detention_facility=facility,
+                last_checked=now,
+                first_seen=now
+            )
+
+        self.logger.info("ICE locator: Could not parse results")
+        return None
+
+    def _detect_ice_changes(self, new_status: Optional[IceDetaineeStatus]) -> List[str]:
+        """
+        Compare new ICE status vs stored status and return list of changes.
+        Uses failure counter to avoid false 'removed' alerts on transient errors.
+        """
+        changes = []
+
+        if new_status is None:
+            if self.ice_status is not None:
+                self.ice_check_failures += 1
+                if self.ice_check_failures >= 3:
+                    changes.append("REMOVED from ICE detainee locator (not found after 3 consecutive checks)")
+                else:
+                    self.logger.info(f"ICE: Person not found (failure {self.ice_check_failures}/3, not alerting yet)")
+            return changes
+
+        # Reset failure counter on successful check
+        self.ice_check_failures = 0
+
+        if self.ice_status is None:
+            # Newly found
+            changes.append(f"NEWLY FOUND in ICE detainee locator: {new_status.status}, State: {new_status.state}, Facility: {new_status.detention_facility}")
+            # Preserve first_seen time
+            new_status.first_seen = datetime.now().isoformat()
+        else:
+            # Preserve original first_seen
+            new_status.first_seen = self.ice_status.first_seen
+
+            if new_status.status != self.ice_status.status:
+                changes.append(f"Status changed: {self.ice_status.status} -> {new_status.status}")
+            if new_status.state != self.ice_status.state:
+                changes.append(f"State changed: {self.ice_status.state} -> {new_status.state}")
+            if new_status.detention_facility != self.ice_status.detention_facility:
+                changes.append(f"Facility changed: {self.ice_status.detention_facility} -> {new_status.detention_facility}")
+
+        return changes
+
+    def _send_ice_notification(self, changes: List[str], current_status: Optional[IceDetaineeStatus]):
+        """Send notification about ICE detainee status changes"""
+        if not changes:
+            return
+
+        # Build SMS message
+        message_parts = [f"🚨 ICE Alert: {self.defendant_first_name} {self.defendant_last_name}"]
+        for change in changes:
+            message_parts.append(f"  • {change}")
+        if current_status:
+            message_parts.append(f"\nCurrent: {current_status.status}")
+            message_parts.append(f"State: {current_status.state}")
+            message_parts.append(f"Facility: {current_status.detention_facility}")
+        message = "\n".join(message_parts)
+
+        # Send SMS via Twilio
+        if self.notification_sms:
+            try:
+                from twilio.rest import Client
+                if all([self.twilio_account_sid, self.twilio_auth_token, self.twilio_phone_number]):
+                    client = Client(self.twilio_account_sid, self.twilio_auth_token)
+                    sms_message = client.messages.create(
+                        body=message,
+                        from_=self.twilio_phone_number,
+                        to=self.notification_sms
+                    )
+                    self.logger.info(f"📱 ICE SMS sent to {self.notification_sms} (SID: {sms_message.sid})")
+            except Exception as e:
+                self.logger.error(f"❌ Error sending ICE SMS: {e}")
+
+        # Send Email
+        if self.notification_email:
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+
+                if all([self.smtp_server, self.smtp_username, self.smtp_password]):
+                    msg = MIMEMultipart('alternative')
+                    msg['Subject'] = f"🚨 ICE Alert: {self.defendant_first_name} {self.defendant_last_name}"
+                    msg['From'] = self.smtp_from_address
+                    msg['To'] = self.notification_email
+
+                    text_body = message
+
+                    html_body = f"""
+                    <html>
+                      <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                        <div style="background-color: #e65100; color: white; padding: 15px; border-radius: 5px 5px 0 0;">
+                          <h2 style="margin: 0;">🚨 ICE Detainee Alert</h2>
+                          <p style="margin: 5px 0 0 0; font-size: 16px;">{self.defendant_first_name} {self.defendant_last_name}</p>
+                        </div>
+                        <div style="padding: 20px; background-color: #f5f5f5; border-radius: 0 0 5px 5px;">
+                          <div style="background-color: white; padding: 15px; margin-bottom: 15px; border-radius: 5px; border-left: 4px solid #e65100;">
+                            <h3 style="margin: 0 0 10px 0; color: #e65100;">Changes Detected</h3>
+                            <ul style="margin: 5px 0; padding-left: 20px;">
+                    """
+                    for change in changes:
+                        html_body += f"<li><strong>{change}</strong></li>"
+
+                    html_body += """
+                            </ul>
+                          </div>
+                    """
+
+                    if current_status:
+                        html_body += f"""
+                          <div style="background-color: white; padding: 15px; border-radius: 5px; border-left: 4px solid #2196f3;">
+                            <h3 style="margin: 0 0 10px 0; color: #2196f3;">Current Status</h3>
+                            <table style="width: 100%; border-collapse: collapse;">
+                              <tr><td style="padding: 8px; font-weight: bold;">Name</td><td style="padding: 8px;">{current_status.full_name}</td></tr>
+                              <tr><td style="padding: 8px; font-weight: bold;">Status</td><td style="padding: 8px;">{current_status.status}</td></tr>
+                              <tr><td style="padding: 8px; font-weight: bold;">State</td><td style="padding: 8px;">{current_status.state}</td></tr>
+                              <tr><td style="padding: 8px; font-weight: bold;">Facility</td><td style="padding: 8px;">{current_status.detention_facility}</td></tr>
+                              <tr><td style="padding: 8px; font-weight: bold;">Country of Birth</td><td style="padding: 8px;">{current_status.country_of_birth}</td></tr>
+                              <tr><td style="padding: 8px; font-weight: bold;">First Seen</td><td style="padding: 8px;">{current_status.first_seen}</td></tr>
+                              <tr><td style="padding: 8px; font-weight: bold;">Last Checked</td><td style="padding: 8px;">{current_status.last_checked}</td></tr>
+                            </table>
+                          </div>
+                        """
+
+                    html_body += """
+                        </div>
+                        <div style="text-align: center; padding: 15px; color: #999; font-size: 12px;">
+                          <p>ICE Detainee Locator Monitor</p>
+                        </div>
+                      </body>
+                    </html>
+                    """
+
+                    part1 = MIMEText(text_body, 'plain')
+                    part2 = MIMEText(html_body, 'html')
+                    msg.attach(part1)
+                    msg.attach(part2)
+
+                    recipients = [email.strip() for email in self.notification_email.split(',')]
+                    with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                        server.starttls()
+                        server.login(self.smtp_username, self.smtp_password)
+                        server.sendmail(self.smtp_from_address, recipients, msg.as_string())
+
+                    self.logger.info(f"📧 ICE email sent to {', '.join(recipients)}")
+            except Exception as e:
+                self.logger.error(f"❌ Error sending ICE email: {e}")
+
     def check_all_cases(self) -> Dict[str, any]:
         """
         Check all cases from the search results
@@ -1499,9 +2131,14 @@ class MiamiDadeCourtMonitor:
             'total_cases': 0,
             'total_charges': 0,
             'total_dockets': 0,
+            'total_documents': 0,
             'new_charges': [],
             'new_dockets': [],
-            'case_summaries': []
+            'new_documents_count': 0,
+            'total_documents_seen': 0,
+            'case_summaries': [],
+            'ice_changes': [],
+            'ice_status': None
         }
 
         try:
@@ -1600,9 +2237,7 @@ class MiamiDadeCourtMonitor:
                         continue
 
                 # Fetch charges and docket entries
-
-                # Fetch charges and docket entries
-                charges, docket_entries = self._fetch_case_details(case_url, case_number)
+                charges, docket_entries, new_documents_this_case, total_documents_this_case = self._fetch_case_details(case_url, case_number)
 
                 # Update case info
                 self.case_info[case_number] = CaseInfo(
@@ -1618,6 +2253,8 @@ class MiamiDadeCourtMonitor:
 
                 results['total_charges'] += len(charges)
                 results['total_dockets'] += len(docket_entries)
+                results['new_documents_count'] += new_documents_this_case
+                results['total_documents_seen'] += total_documents_this_case
 
                 # Check for new charges
                 new_charges_this_case = []
@@ -1656,8 +2293,10 @@ class MiamiDadeCourtMonitor:
                     'case_number': case_number,
                     'charge_count': len(charges),
                     'docket_count': len(docket_entries),
+                    'documents_count': new_documents_this_case,
                     'new_charges_count': len(new_charges_this_case),
                     'new_dockets_count': len(new_dockets_this_case),
+                    'new_documents_count': new_documents_this_case,
                     'first_charge': case_data['first_charge']
                 })
 
@@ -1667,25 +2306,47 @@ class MiamiDadeCourtMonitor:
             
             # Save state
             self._save_state()
-            
+
+            # ICE detainee locator check
+            if self.ice_monitoring:
+                try:
+                    new_ice_status = self._check_ice_status()
+                    ice_changes = self._detect_ice_changes(new_ice_status)
+                    if new_ice_status is not None:
+                        self.ice_status = new_ice_status
+                    elif self.ice_check_failures >= 3:
+                        self.ice_status = None
+                    results['ice_changes'] = ice_changes
+                    results['ice_status'] = self.ice_status
+                    self._save_state()
+                except Exception as ice_err:
+                    self.logger.error(f"Error during ICE check: {ice_err}")
+                    import traceback
+                    self.logger.debug(traceback.format_exc())
+
         except Exception as e:
             self.logger.error(f"Error checking cases: {e}")
             import traceback
             self.logger.debug(traceback.format_exc())
-        
+
         return results
     
     def _send_notification(self, new_charges: List[Charge], new_dockets: List[DocketEntry]):
         """
         Send notifications about new charges and dockets via SMS and/or email
 
-        Environment variables needed for Twilio SMS:
-        - TWILIO_ACCOUNT_SID: Your Twilio Account SID
-        - TWILIO_AUTH_TOKEN: Your Twilio Auth Token
-        - TWILIO_PHONE_NUMBER: Your Twilio phone number (e.g., +12345678900)
-        """
-        import os
+        Configuration in JSON file for Twilio SMS:
+        - twilio_account_sid: Your Twilio Account SID
+        - twilio_auth_token: Your Twilio Auth Token
+        - twilio_phone_number: Your Twilio phone number (e.g., +12345678900)
 
+        Configuration in JSON file for Email:
+        - smtp_server: SMTP server (e.g., smtp.gmail.com)
+        - smtp_port: SMTP port (default: 587)
+        - smtp_username: Your email username
+        - smtp_password: Your email password or app password
+        - smtp_from_address: From address (optional, defaults to smtp_username)
+        """
         # Build notification message
         message_parts = []
         message_parts.append(f"🚨 Court Alert: {self.defendant_first_name} {self.defendant_last_name}")
@@ -1712,19 +2373,15 @@ class MiamiDadeCourtMonitor:
             try:
                 from twilio.rest import Client
 
-                account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
-                auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
-                from_number = os.environ.get('TWILIO_PHONE_NUMBER')
-
-                if not all([account_sid, auth_token, from_number]):
-                    self.logger.warning("⚠️  Twilio credentials not found in environment variables")
-                    self.logger.warning("   Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER")
+                if not all([self.twilio_account_sid, self.twilio_auth_token, self.twilio_phone_number]):
+                    self.logger.warning("⚠️  Twilio credentials not found in configuration")
+                    self.logger.warning("   Set twilio_account_sid, twilio_auth_token, and twilio_phone_number in config file")
                 else:
-                    client = Client(account_sid, auth_token)
+                    client = Client(self.twilio_account_sid, self.twilio_auth_token)
 
                     sms_message = client.messages.create(
                         body=message,
-                        from_=from_number,
+                        from_=self.twilio_phone_number,
                         to=self.notification_sms
                     )
 
@@ -1742,20 +2399,14 @@ class MiamiDadeCourtMonitor:
                 from email.mime.text import MIMEText
                 from email.mime.multipart import MIMEMultipart
 
-                smtp_server = os.environ.get('EMAIL_SMTP_SERVER')
-                smtp_port = int(os.environ.get('EMAIL_SMTP_PORT', '587'))
-                smtp_username = os.environ.get('EMAIL_USERNAME')
-                smtp_password = os.environ.get('EMAIL_PASSWORD')
-                from_email = os.environ.get('EMAIL_FROM_ADDRESS', smtp_username)
-
-                if not all([smtp_server, smtp_username, smtp_password]):
-                    self.logger.warning("⚠️  Email credentials not found in environment variables")
-                    self.logger.warning("   Set EMAIL_SMTP_SERVER, EMAIL_USERNAME, EMAIL_PASSWORD")
+                if not all([self.smtp_server, self.smtp_username, self.smtp_password]):
+                    self.logger.warning("⚠️  Email credentials not found in configuration")
+                    self.logger.warning("   Set smtp_server, smtp_username, and smtp_password in config file")
                 else:
                     # Create email message
                     msg = MIMEMultipart('alternative')
                     msg['Subject'] = f"🚨 Court Alert: {self.defendant_first_name} {self.defendant_last_name}"
-                    msg['From'] = from_email
+                    msg['From'] = self.smtp_from_address
                     msg['To'] = self.notification_email
 
                     # Create plain text version
@@ -1858,13 +2509,14 @@ class MiamiDadeCourtMonitor:
                     msg.attach(part1)
                     msg.attach(part2)
 
-                    # Send email
-                    with smtplib.SMTP(smtp_server, smtp_port) as server:
+                    # Send email (supports comma-separated multiple recipients)
+                    recipients = [email.strip() for email in self.notification_email.split(',')]
+                    with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                         server.starttls()
-                        server.login(smtp_username, smtp_password)
-                        server.sendmail(from_email, self.notification_email, msg.as_string())
+                        server.login(self.smtp_username, self.smtp_password)
+                        server.sendmail(self.smtp_from_address, recipients, msg.as_string())
 
-                    self.logger.info(f"📧 Email sent to {self.notification_email}")
+                    self.logger.info(f"📧 Email sent to {', '.join(recipients)}")
 
             except ImportError:
                 self.logger.error("❌ Email libraries not available (should be built-in)")
@@ -1941,6 +2593,22 @@ class MiamiDadeCourtMonitor:
         # Send notifications (stub)
         self._send_notification(new_charges, new_dockets)
 
+        # Handle ICE changes
+        ice_changes = results.get('ice_changes', [])
+        if ice_changes:
+            print("\n" + "="*80)
+            print("🚨 ICE DETAINEE STATUS CHANGES DETECTED!")
+            print("="*80)
+            for change in ice_changes:
+                print(f"  • {change}")
+            ice_status = results.get('ice_status')
+            if ice_status:
+                print(f"\n  Current Status: {ice_status.status}")
+                print(f"  State: {ice_status.state}")
+                print(f"  Facility: {ice_status.detention_facility}")
+            print("="*80)
+            self._send_ice_notification(ice_changes, ice_status)
+
     def _save_new_entries_to_file(self, charges: List[Charge], dockets: List[DocketEntry]):
         """Save new charges and dockets to timestamped JSON file"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1961,27 +2629,53 @@ class MiamiDadeCourtMonitor:
     
     def print_summary(self, results: Dict):
         """Print summary of current state"""
+        # First show Per-Case Breakdown
+        if results['case_summaries']:
+            print("\n" + "="*80)
+            print("📋 PER-CASE BREAKDOWN")
+            print("="*80)
+            for summary in results['case_summaries']:
+                charge_indicator = f" ({summary['new_charges_count']} NEW!)" if summary.get('new_charges_count', 0) > 0 else ""
+                docket_indicator = f" ({summary['new_dockets_count']} NEW!)" if summary.get('new_dockets_count', 0) > 0 else ""
+                document_indicator = f" ({summary['new_documents_count']} NEW!)" if summary.get('new_documents_count', 0) > 0 else ""
+                print(f"  {summary['case_number']}:")
+                print(f"    Charges: {summary['charge_count']}{charge_indicator}")
+                print(f"    Dockets: {summary['docket_count']}{docket_indicator}")
+                print(f"    Documents Found: {summary['documents_count']}{document_indicator}")
+                print(f"    First Charge: {summary['first_charge']}")
+                print()
+            print("="*80)
+
+        # Then show Case Summary at the end
         print("\n" + "="*80)
         print("📊 CASE SUMMARY")
         print("="*80)
         print(f"Total Cases Monitored: {results['total_cases']}")
         print(f"Total Charges: {results['total_charges']}")
         print(f"Total Docket Entries: {results['total_dockets']}")
+        print(f"Total Documents Seen: {results['total_documents_seen']}")
         print(f"New Charges This Check: {len(results['new_charges'])}")
         print(f"New Dockets This Check: {len(results['new_dockets'])}")
-        print()
-
-        if results['case_summaries']:
-            print("Per-Case Breakdown:")
-            print("-" * 80)
-            for summary in results['case_summaries']:
-                charge_indicator = f" ({summary['new_charges_count']} NEW!)" if summary.get('new_charges_count', 0) > 0 else ""
-                docket_indicator = f" ({summary['new_dockets_count']} NEW!)" if summary.get('new_dockets_count', 0) > 0 else ""
-                print(f"  {summary['case_number']}:")
-                print(f"    Charges: {summary['charge_count']}{charge_indicator}")
-                print(f"    Dockets: {summary['docket_count']}{docket_indicator}")
-                print(f"    First Charge: {summary['first_charge']}")
+        print(f"New Documents This Check: {results['new_documents_count']}")
         print("="*80)
+
+        # ICE Detainee Status
+        if self.ice_monitoring:
+            print("\n" + "="*80)
+            print("🔒 ICE DETAINEE STATUS")
+            print("="*80)
+            ice_status = results.get('ice_status') or self.ice_status
+            if ice_status:
+                print(f"  Name: {ice_status.full_name}")
+                print(f"  Status: {ice_status.status}")
+                print(f"  State: {ice_status.state}")
+                print(f"  Facility: {ice_status.detention_facility}")
+                print(f"  Country of Birth: {ice_status.country_of_birth}")
+                print(f"  First Seen: {ice_status.first_seen}")
+                print(f"  Last Checked: {ice_status.last_checked}")
+            else:
+                print("  Not found in ICE detainee locator")
+            print("="*80)
     
     def run(self):
         """Run the monitoring loop"""
@@ -1990,6 +2684,8 @@ class MiamiDadeCourtMonitor:
         self.logger.info("="*60)
         self.logger.info(f"⏱️  Poll interval: {self.poll_interval} seconds ({self.poll_interval // 60} minutes)")
         self.logger.info(f"👤 Monitoring defendant: {self.defendant_first_name} {self.defendant_last_name} ({self.defendant_sex})")
+        if self.ice_monitoring:
+            self.logger.info(f"🔒 ICE detainee monitoring: ENABLED (Country: {self.country_of_birth})")
 
         try:
             # Initialize browser
@@ -2037,6 +2733,26 @@ def load_monitor_config(config_file, args):
     download_documents = args.download_documents if hasattr(args, 'download_documents') else True
     documents_dir = args.documents_dir if hasattr(args, 'documents_dir') else "court_documents"
     filter_case_number = args.case if hasattr(args, 'case') else ""
+    enable_screenshots = args.screenshots if hasattr(args, 'screenshots') else False
+
+    # SMTP configuration
+    smtp_server = ""
+    smtp_port = 587
+    smtp_username = ""
+    smtp_password = ""
+    smtp_from_address = ""
+
+    # Twilio configuration
+    twilio_account_sid = ""
+    twilio_auth_token = ""
+    twilio_phone_number = ""
+
+    # ICE detainee locator (defaults, overridden by config file)
+    ice_monitoring = False
+    country_of_birth = ""
+    dob_month = ""
+    dob_day = ""
+    dob_year = ""
     # #region agent log
     with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
         import json as json_module
@@ -2056,6 +2772,29 @@ def load_monitor_config(config_file, args):
             notification_email = config.get('notification_email', notification_email)
             download_documents = config.get('download_documents', download_documents)
             documents_dir = config.get('documents_dir', documents_dir)
+
+            # SMTP configuration
+            smtp_server = config.get('smtp_server', smtp_server)
+            smtp_port = config.get('smtp_port', smtp_port)
+            smtp_username = config.get('smtp_username', smtp_username)
+            smtp_password = config.get('smtp_password', smtp_password)
+            smtp_from_address = config.get('smtp_from_address', smtp_from_address)
+
+            # Twilio configuration
+            twilio_account_sid = config.get('twilio_account_sid', twilio_account_sid)
+            twilio_auth_token = config.get('twilio_auth_token', twilio_auth_token)
+            twilio_phone_number = config.get('twilio_phone_number', twilio_phone_number)
+
+            # ICE detainee locator configuration
+            ice_monitoring = config.get('ice_monitoring', False)
+            country_of_birth = config.get('country_of_birth', '')
+            dob_month = config.get('date_of_birth_month', '')
+            dob_day = config.get('date_of_birth_day', '')
+            dob_year = config.get('date_of_birth_year', '')
+
+            if ice_monitoring and not country_of_birth:
+                print(f"⚠️  Warning: ice_monitoring is enabled but country_of_birth is not set in '{config_file}'")
+
             # Command-line --case flag overrides config file
             if not filter_case_number:
                 filter_case_number = config.get('filter_case_number', filter_case_number)
@@ -2093,7 +2832,21 @@ def load_monitor_config(config_file, args):
         'notification_email': notification_email,
         'download_documents': download_documents,
         'documents_dir': documents_dir,
-        'filter_case_number': filter_case_number
+        'filter_case_number': filter_case_number,
+        'enable_screenshots': enable_screenshots,
+        'smtp_server': smtp_server,
+        'smtp_port': smtp_port,
+        'smtp_username': smtp_username,
+        'smtp_password': smtp_password,
+        'smtp_from_address': smtp_from_address,
+        'twilio_account_sid': twilio_account_sid,
+        'twilio_auth_token': twilio_auth_token,
+        'twilio_phone_number': twilio_phone_number,
+        'ice_monitoring': ice_monitoring,
+        'country_of_birth': country_of_birth,
+        'dob_month': dob_month,
+        'dob_day': dob_day,
+        'dob_year': dob_year
     }
 
 
@@ -2190,6 +2943,11 @@ Config file format (config.json):
         default='',
         help='Monitor only a specific case number (e.g., F-25-024652 or F25024652)'
     )
+    parser.add_argument(
+        '--screenshots',
+        action='store_true',
+        help='Enable debug screenshots (default: off)'
+    )
 
     args = parser.parse_args()
 
@@ -2252,7 +3010,21 @@ Config file format (config.json):
             'notification_email': '',
             'download_documents': args.download_documents,
             'documents_dir': args.documents_dir,
-            'filter_case_number': args.case
+            'filter_case_number': args.case,
+            'enable_screenshots': args.screenshots,
+            'smtp_server': '',
+            'smtp_port': 587,
+            'smtp_username': '',
+            'smtp_password': '',
+            'smtp_from_address': '',
+            'twilio_account_sid': '',
+            'twilio_auth_token': '',
+            'twilio_phone_number': '',
+            'ice_monitoring': False,
+            'country_of_birth': '',
+            'dob_month': '',
+            'dob_day': '',
+            'dob_year': ''
         })
 
     # Warn about aggressive polling
