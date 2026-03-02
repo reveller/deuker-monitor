@@ -2527,12 +2527,13 @@ class MiamiDadeCourtMonitor:
             self.logger.info(f"📧 Notification: {len(new_charges)} new charges, {len(new_dockets)} new dockets (no recipients configured)")
 
     def on_new_entries(self, results: Dict):
-        """Handle new charges and docket entries"""
+        """Handle new charges, docket entries, and ICE status changes"""
         new_charges = results['new_charges']
         new_dockets = results['new_dockets']
+        ice_changes = results.get('ice_changes', [])
 
-        if not new_charges and not new_dockets:
-            self.logger.info("✓ No new charges or docket entries")
+        if not new_charges and not new_dockets and not ice_changes:
+            self.logger.info("✓ No new charges, docket entries, or ICE changes")
             return
 
         # Display new charges
@@ -2587,11 +2588,10 @@ class MiamiDadeCourtMonitor:
 
             print("="*80)
 
-        # Save to file
-        self._save_new_entries_to_file(new_charges, new_dockets)
-
-        # Send notifications (stub)
-        self._send_notification(new_charges, new_dockets)
+        # Save to file and send court notifications only if there are court changes
+        if new_charges or new_dockets:
+            self._save_new_entries_to_file(new_charges, new_dockets)
+            self._send_notification(new_charges, new_dockets)
 
         # Handle ICE changes
         ice_changes = results.get('ice_changes', [])
