@@ -7,6 +7,7 @@ Author: Created for monitoring Miami-Dade court cases
 Python Version: 3.11.9
 """
 
+import os
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -1608,6 +1609,7 @@ class MiamiDadeCourtMonitor:
             return None
 
         driver = None
+        virtual_display = None
         try:
             self.logger.info("Checking ICE detainee locator...")
             import undetected_chromedriver as uc
@@ -1616,9 +1618,21 @@ class MiamiDadeCourtMonitor:
             from selenium.webdriver.support import expected_conditions as EC
             from selenium.webdriver.common.action_chains import ActionChains
 
+            # If no display is available (e.g. cron/background), start a virtual one
+            if not os.environ.get("DISPLAY"):
+                try:
+                    from pyvirtualdisplay import Display
+                    virtual_display = Display(visible=False, size=(1920, 1080))
+                    virtual_display.start()
+                    self.logger.info(f"Started virtual display :{virtual_display.display}")
+                except Exception as e:
+                    self.logger.error(f"Failed to start virtual display: {e}")
+                    self.logger.error("Install xvfb: sudo apt install xvfb")
+                    return None
+
             options = uc.ChromeOptions()
             # ICE site WAF blocks headless browsers, so always run non-headless
-            # The window will briefly appear on screen during checks
+            # When no physical display is available, xvfb provides a virtual one
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
@@ -1909,6 +1923,12 @@ class MiamiDadeCourtMonitor:
             if driver:
                 try:
                     driver.quit()
+                except Exception:
+                    pass
+            if virtual_display:
+                try:
+                    virtual_display.stop()
+                    self.logger.debug("Stopped virtual display")
                 except Exception:
                     pass
 
@@ -2872,6 +2892,9 @@ Example usage:
   # Monitor multiple defendants at once
   python3 deuker-monitor.py -c ricardo.json -c sina.json --once
 
+  # Only run ICE detainee locator check (no court monitor)
+  python3 deuker-monitor.py -c ricardo.json --test-ice
+
   # Use config file (recommended)
   python3 deuker-monitor.py -c config.json -i 300
 
@@ -2947,6 +2970,11 @@ Config file format (config.json):
         '--screenshots',
         action='store_true',
         help='Enable debug screenshots (default: off)'
+    )
+    parser.add_argument(
+        '--test-ice',
+        action='store_true',
+        help='Only run ICE detainee locator check (skip court monitor)'
     )
 
     args = parser.parse_args()
@@ -3031,6 +3059,34 @@ Config file format (config.json):
     for config in monitor_configs:
         if config['poll_interval'] < 60:
             print(f"⚠️  Warning: Interval < 60 seconds may be too aggressive for {config['defendant_first_name']} {config['defendant_last_name']}")
+
+    # --test-ice: Only run ICE detainee locator check, skip court monitor
+    if args.test_ice:
+        for idx, config in enumerate(monitor_configs, 1):
+            name = f"{config['defendant_first_name']} {config['defendant_last_name']}"
+            if not config.get('ice_monitoring'):
+                print(f"⚠️  ICE monitoring not enabled for {name}. Set \"ice_monitoring\": true in config.")
+                continue
+
+            print(f"\n🔒 Running ICE detainee locator check for {name}...")
+            # Create monitor without initializing the Playwright browser
+            monitor = MiamiDadeCourtMonitor(**config)
+            ice_status = monitor._check_ice_status()
+
+            if ice_status:
+                print(f"\n{'=' * 60}")
+                print(f"  Name:     {ice_status.full_name}")
+                print(f"  Status:   {ice_status.status}")
+                print(f"  State:    {ice_status.state}")
+                print(f"  Facility: {ice_status.detention_facility}")
+                print(f"  Country:  {ice_status.country_of_birth}")
+                print(f"  Checked:  {ice_status.last_checked}")
+                print(f"{'=' * 60}")
+            else:
+                print("❌ No ICE detainee record found or check failed.")
+
+        print("\n✅ ICE check complete.")
+        return 0
 
     # Run monitors
     if args.once:
