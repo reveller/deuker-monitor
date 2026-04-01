@@ -944,7 +944,9 @@ class MiamiDadeCourtMonitor:
                 self.logger.debug(f"Attempting to open document viewer for Din {docket.din}")
 
                 # Step 1: Find and click the "View Image" button
-                desc_search = docket.docket_description[:30].strip()
+                # Normalize description for matching: the parsed HTML may include
+                # characters (like '/') that the rendered page text omits
+                desc_search = re.sub(r'[^\w\s]', '', docket.docket_description[:30]).strip()
                 self.logger.debug(f"Looking for row with description: {desc_search}")
 
                 # Find all rows, check if they contain this docket description
@@ -954,7 +956,7 @@ class MiamiDadeCourtMonitor:
 
                 for i in range(rows.count()):
                     row = rows.nth(i)
-                    row_text = row.inner_text()
+                    row_text = re.sub(r'[^\w\s]', '', row.inner_text())
 
                     # Check if this row contains the docket description
                     if desc_search in row_text:
