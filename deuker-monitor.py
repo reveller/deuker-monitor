@@ -189,12 +189,6 @@ class MiamiDadeCourtMonitor:
         self.logger = logging.getLogger(__name__)
 
         self.filter_case_number = self._normalize_case_number(filter_case_number) if filter_case_number else ""
-        # #region agent log
-        with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-            import json as json_module
-            f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:127','message':'Filter case number initialized in __init__','data':{'original':filter_case_number,'normalized':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
-        # #endregion
-        print(f"🔍 DEBUG: __init__ - filter_case_number param = '{filter_case_number}', normalized = '{self.filter_case_number}'")
 
         # Create documents directory if download is enabled
         if self.download_documents:
@@ -229,20 +223,10 @@ class MiamiDadeCourtMonitor:
         if len(clean) == 9 and clean[0].isalpha() and clean[1:].isdigit():
             normalized = f"{clean[0]}-{clean[1:3]}-{clean[3:]}"
             self.logger.debug(f"Normalized case number: {case_number} -> {normalized}")
-            # #region agent log
-            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                import json as json_module
-                f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'C','location':'deuker-monitor.py:160','message':'Case number normalized','data':{'input':case_number,'clean':clean,'normalized':normalized,'len_clean':len(clean),'is_alpha':clean[0].isalpha() if clean else False,'is_digit':clean[1:].isdigit() if len(clean)>1 else False},'timestamp':int(time.time()*1000)})+'\n')
-            # #endregion
             return normalized
         else:
             # Already has dashes or unknown format, return as-is
             self.logger.warning(f"Case number format not recognized: {case_number}")
-            # #region agent log
-            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                import json as json_module
-                f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'C','location':'deuker-monitor.py:166','message':'Case number normalization failed','data':{'input':case_number,'clean':clean,'len_clean':len(clean),'returning':case_number.upper()},'timestamp':int(time.time()*1000)})+'\n')
-            # #endregion
             return case_number.upper()
 
     def _load_state(self):
@@ -612,11 +596,6 @@ class MiamiDadeCourtMonitor:
                         })
 
                         self.logger.debug(f"Found case: {case_number}")
-                        # #region agent log
-                        with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                            import json as json_module
-                            f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'B','location':'deuker-monitor.py:491','message':'Case extracted from page','data':{'case_number':case_number,'case_text_preview':case_text[:50],'has_link':case_link is not None,'filter_case_number':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
-                        # #endregion
 
                     except Exception as e:
                         self.logger.debug(f"Error parsing case row: {e}")
@@ -2147,6 +2126,8 @@ class MiamiDadeCourtMonitor:
         Returns:
             Dict with statistics and new entries
         """
+        self._cleanup_old_new_entries()
+
         results = {
             'total_cases': 0,
             'total_charges': 0,
@@ -2164,34 +2145,14 @@ class MiamiDadeCourtMonitor:
         try:
             # Extract case links (this method now handles page navigation)
             cases = self._extract_case_links()
-            # #region agent log
-            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                import json as json_module
-                f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'D','location':'deuker-monitor.py:1396','message':'Cases extracted before filtering','data':{'total_cases':len(cases),'case_numbers':[c['case_number'] for c in cases],'filter_case_number':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
-            # #endregion
 
             # Filter to specific case if requested
             if self.filter_case_number:
                 self.logger.info(f"Filtering to case: {self.filter_case_number}")
-                # #region agent log
-                with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                    import json as json_module
-                    f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A','location':'deuker-monitor.py:1401','message':'Before filtering comparison','data':{'filter_case_number':self.filter_case_number,'extracted_cases':[{'case_number':c['case_number'],'matches':c['case_number']==self.filter_case_number} for c in cases]},'timestamp':int(time.time()*1000)})+'\n')
-                # #endregion
                 cases = [c for c in cases if c['case_number'] == self.filter_case_number]
-                # #region agent log
-                with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                    import json as json_module
-                    f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A','location':'deuker-monitor.py:1401','message':'After filtering comparison','data':{'filter_case_number':self.filter_case_number,'filtered_count':len(cases),'filtered_cases':[c['case_number'] for c in cases]},'timestamp':int(time.time()*1000)})+'\n')
-                # #endregion
 
                 if not cases:
                     self.logger.warning(f"Case {self.filter_case_number} not found for {self.defendant_first_name} {self.defendant_last_name}")
-                    # #region agent log
-                    with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                        import json as json_module
-                        f.write(json_module.dumps({'sessionId':'debug-session','runId':'run1','hypothesisId':'A','location':'deuker-monitor.py:1404','message':'Case not found after filtering','data':{'filter_case_number':self.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
-                    # #endregion
                     return results
 
                 self.logger.info(f"Found matching case: {self.filter_case_number}")
@@ -2646,6 +2607,17 @@ class MiamiDadeCourtMonitor:
             print(f"💾 Details saved to: {filename}")
         except Exception as e:
             self.logger.error(f"Error saving entries: {e}")
+
+    def _cleanup_old_new_entries(self, retention_days: int = 7):
+        """Delete new_entries JSON files older than retention_days"""
+        cutoff = datetime.now().timestamp() - (retention_days * 86400)
+        removed = 0
+        for path in Path('.').glob('new_entries_*.json'):
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        if removed:
+            self.logger.info(f"Cleaned up {removed} new_entries file(s) older than {retention_days} days")
     
     def print_summary(self, results: Dict):
         """Print summary of current state"""
@@ -2773,12 +2745,6 @@ def load_monitor_config(config_file, args):
     dob_month = ""
     dob_day = ""
     dob_year = ""
-    # #region agent log
-    with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-        import json as json_module
-        f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2007','message':'In load_monitor_config - args.case value','data':{'args_case':getattr(args,'case','NOT_SET'),'hasattr_case':hasattr(args,'case'),'filter_case_number_initial':filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
-    # #endregion
-    print(f"🔍 DEBUG: load_monitor_config - args.case = {getattr(args, 'case', 'NOT_SET')}, filter_case_number = {filter_case_number}")
 
     try:
         with open(config_file, 'r') as f:
@@ -2818,12 +2784,6 @@ def load_monitor_config(config_file, args):
             # Command-line --case flag overrides config file
             if not filter_case_number:
                 filter_case_number = config.get('filter_case_number', filter_case_number)
-            # #region agent log
-            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                import json as json_module
-                f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2029','message':'After config file load - filter_case_number','data':{'filter_case_number':filter_case_number,'config_has_filter':config.get('filter_case_number','NOT_IN_CONFIG')},'timestamp':int(time.time()*1000)})+'\n')
-            # #endregion
-            print(f"🔍 DEBUG: After config load - filter_case_number = {filter_case_number}, config has filter = {config.get('filter_case_number', 'NOT_IN_CONFIG')}")
     except FileNotFoundError:
         print(f"❌ Error: Config file '{config_file}' not found")
         return None
@@ -2993,18 +2953,8 @@ Config file format (config.json):
 
     if args.config:
         # Load configurations from config file(s)
-        # #region agent log
-        with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-            import json as json_module
-            f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2113','message':'Before load_monitor_config','data':{'args_case':getattr(args,'case','NOT_SET'),'args_all':getattr(args,'all',False),'config_files':args.config},'timestamp':int(time.time()*1000)})+'\n')
-        # #endregion
         for config_file in args.config:
             config = load_monitor_config(config_file, args)
-            # #region agent log
-            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                import json as json_module
-                f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2119','message':'After load_monitor_config','data':{'config_filter_case_number':config.get('filter_case_number','NOT_SET') if config else 'CONFIG_IS_NONE'},'timestamp':int(time.time()*1000)})+'\n')
-            # #endregion
             if config is None:
                 return 1
             monitor_configs.append(config)
@@ -3099,18 +3049,8 @@ Config file format (config.json):
             print("=" * 80)
 
             monitor = MiamiDadeCourtMonitor(**config)
-            # #region agent log
-            with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                import json as json_module
-                f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2168','message':'Monitor created with config','data':{'filter_case_number':config.get('filter_case_number','NOT_SET'),'skip_state':config.get('skip_state',False),'all_keys':list(config.keys())},'timestamp':int(time.time()*1000)})+'\n')
-            # #endregion
             try:
                 monitor._init_browser()
-                # #region agent log
-                with open('/home/sfeltner/Projects/deuker-monitor/.cursor/debug.log', 'a') as f:
-                    import json as json_module
-                    f.write(json_module.dumps({'sessionId':'debug-session','runId':'post-fix','hypothesisId':'E','location':'deuker-monitor.py:2171','message':'Before check_all_cases','data':{'monitor_filter_case_number':monitor.filter_case_number},'timestamp':int(time.time()*1000)})+'\n')
-                # #endregion
                 results = monitor.check_all_cases()
                 monitor.on_new_entries(results)
                 monitor.print_summary(results)
